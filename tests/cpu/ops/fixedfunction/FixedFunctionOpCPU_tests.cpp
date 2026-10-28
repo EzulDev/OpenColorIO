@@ -1453,3 +1453,90 @@ OCIO_ADD_TEST(FixedFunctionOpCPU, LIN_TO_DOUBLE_LOG)
         ApplyFixedFunction(img.data(), linearFrame.data(), NumPixels, dataFInv, 1e-6f, __LINE__, false);
     }
 }
+
+
+OCIO_ADD_TEST(FixedFunctionOpCPU, aces_gamut_comp_20_limit_J)
+{
+    // Inputs at or just below the J limit used to produce NaN because the
+    // J intersection may land slightly above limit_J_max.
+    OCIO::FixedFunctionOpData::Params params = {
+        // Peak luminance
+        100.f,
+        // Rec709 gamut
+        0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.3290
+    };
+
+    std::vector<float> input_32f = {
+        100.0f, 57.28898620605469f, 45.65402603149414f, 1.0f,
+        100.0f, 10.0f,              46.0f,              1.0f,
+    };
+    const size_t num_limit_samples = input_32f.size() / 4;
+
+    // J at the limit (100 at 100 nits) and the last float steps below it, over all hues
+    // in 0.5 degree steps. About 20 % of these hues gave NaN before.
+    const float M_values[] = { 1.0f, 10.0f, 30.0f, 57.28898620605469f };
+    for (float M : M_values)
+    {
+        for (int ih = 0; ih < 720; ++ih)
+        {
+            float J = 100.0f;
+            for (int i = 0; i < 4; ++i)
+            {
+                input_32f.insert(input_32f.end(), { J, M, 0.5f * ih, 1.0f });
+                J = std::nextafter(J, 0.0f);
+            }
+        }
+    }
+    const unsigned num_samples = static_cast<unsigned>(input_32f.size() / 4);
+
+    for (auto style : { OCIO::FixedFunctionOpData::ACES_GAMUT_COMPRESS_20_FWD,
+                        OCIO::FixedFunctionOpData::ACES_GAMUT_COMPRESS_20_INV })
+    {
+        OCIO::ConstFixedFunctionOpDataRcPtr funcData
+            = std::make_shared<OCIO::FixedFunctionOpData>(style, params);
+
+        OCIO::ConstOpCPURcPtr op;
+        OCIO_CHECK_NO_THROW(op = OCIO::GetFixedFunctionCPURenderer(funcData, false));
+
+        std::vector<float> output_32f(input_32f);
+        OCIO_CHECK_NO_THROW(op->apply(output_32f.data(), output_32f.data(), num_samples));
+
+        for (unsigned idx = 0; idx < num_samples * 4; ++idx)
+        {
+            OCIO_CHECK_ASSERT_MESSAGE(std::isfinite(output_32f[idx]),
+                                      "Index: " + std::to_string(idx));
+        }
+        for (size_t i = 0; i < num_limit_samples; ++i)
+        {
+            OCIO_CHECK_CLOSE(output_32f[i * 4 + 0], 100.0f, 1e-5f);
+            OCIO_CHECK_CLOSE(output_32f[i * 4 + 1], 0.0f, 1e-5f);
+        }
+    }
+}
+
+OCIO_ADD_TEST(FixedFunctionOpCPU, aces_output_transform_20_limit_J)
+{
+    // This input reaches the J limit inside the gamut compression and used to
+    // produce NaN.
+    OCIO::FixedFunctionOpData::Params params = {
+        // Peak luminance
+        100.f,
+        // Rec709 gamut
+        0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.3290
+    };
+    OCIO::ConstFixedFunctionOpDataRcPtr funcData
+        = std::make_shared<OCIO::FixedFunctionOpData>(OCIO::FixedFunctionOpData::ACES_OUTPUT_TRANSFORM_20_FWD,
+                                                      params);
+    OCIO::ConstOpCPURcPtr op;
+    OCIO_CHECK_NO_THROW(op = OCIO::GetFixedFunctionCPURenderer(funcData, false));
+
+    float rgba[4] = { 220.57275390625f, 74.11682891845703f, 3.2731568813323975f, 1.0f };
+    OCIO_CHECK_NO_THROW(op->apply(rgba, rgba, 1));
+
+    for (int c = 0; c < 3; ++c)
+    {
+        OCIO_CHECK_ASSERT(std::isfinite(rgba[c]));
+        OCIO_CHECK_CLOSE(rgba[c], 1.0f, 1e-3f);
+    }
+    OCIO_CHECK_EQUAL(rgba[3], 1.0f);
+}
